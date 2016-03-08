@@ -1,6 +1,8 @@
 import pickle
 
+from lasagne.layers import BatchNormLayer
 from lasagne.layers import ConcatLayer
+from lasagne.layers import Conv2DLayer
 from lasagne.layers import DenseLayer
 from lasagne.layers import InputLayer
 from lasagne.layers import Layer
@@ -246,7 +248,7 @@ def test_clone():
         'on_batch_finished',
         'on_training_started',
         'on_training_finished',
-        'custom_score',
+        'custom_scores'
         ):
         for par in (params, params1, params2):
             par.pop(ignore, None)
@@ -414,6 +416,64 @@ class TestTrainTestSplitBackwardCompatibility:
         X, y = np.ones((10, 3)), np.zeros(10)
         net.train_loop(X, y)
         assert net.__call_args__ == (X, y, 0.3)
+
+
+class TestBatchIterator:
+    @pytest.fixture
+    def BatchIterator(self):
+        from nolearn.lasagne import BatchIterator
+        return BatchIterator
+
+    @pytest.fixture
+    def X(self):
+        return np.arange(200).reshape((10, 20)).T.astype('float')
+
+    @pytest.fixture
+    def X_dict(self):
+        return {
+            'one': np.arange(200).reshape((10, 20)).T.astype('float'),
+            'two': np.arange(200).reshape((20, 10)).astype('float'),
+            }
+
+    @pytest.fixture
+    def y(self):
+        return np.arange(20)
+
+    @pytest.mark.parametrize("shuffle", [True, False])
+    def test_simple_x_and_y(self, BatchIterator, X, y, shuffle):
+        bi = BatchIterator(2, shuffle=shuffle)(X, y)
+        batches = list(bi)
+        assert len(batches) == 10
+        X0, y0 = batches[0]
+        assert X0.shape == (2, 10)
+        assert y0.shape == (2,)
+        if shuffle is False:
+            np.testing.assert_equal(X[:2], X0)
+            np.testing.assert_equal(y[:2], y0)
+
+    @pytest.mark.parametrize("shuffle", [True, False])
+    def test_simple_x_no_y(self, BatchIterator, X, shuffle):
+        bi = BatchIterator(2, shuffle=shuffle)(X)
+        batches = list(bi)
+        assert len(batches) == 10
+        X0, y0 = batches[0]
+        assert X0.shape == (2, 10)
+        assert y0 is None
+        if shuffle is False:
+            np.testing.assert_equal(X[:2], X0)
+
+    @pytest.mark.parametrize("shuffle", [True, False])
+    def test_X_is_dict(self, BatchIterator, X_dict, shuffle):
+        bi = BatchIterator(2, shuffle=shuffle)(X_dict)
+        batches = list(bi)
+        assert len(batches) == 10
+        X0, y0 = batches[0]
+        assert X0['one'].shape == (2, 10)
+        assert X0['two'].shape == (2, 10)
+        assert y0 is None
+        if shuffle is False:
+            np.testing.assert_equal(X_dict['one'][:2], X0['one'])
+            np.testing.assert_equal(X_dict['two'][:2], X0['two'])
 
 
 class TestCheckForUnusedKwargs:
@@ -635,6 +695,29 @@ class TestCheckGoodInput:
         assert (y1 == y).all()
 
 
+class TestGetOutput:
+    def test_layer_object(self, net_fitted, X_train):
+        layer = net_fitted.layers_['conv2']
+        output = net_fitted.get_output(layer, X_train[:3])
+        assert output.shape == (3, 8, 8, 8)
+
+    def test_layer_name(self, net_fitted, X_train):
+        output = net_fitted.get_output('conv2', X_train[:3])
+        assert output.shape == (3, 8, 8, 8)
+
+    def test_get_output_last_layer(self, net_fitted, X_train):
+        result = net_fitted.get_output(net_fitted.layers_[-1], X_train[:129])
+        expected = net_fitted.predict_proba(X_train[:129])
+        np.testing.assert_equal(result, expected)
+
+    def test_no_conv(self, net_no_conv):
+        net_no_conv.initialize()
+        X = np.random.random((10, 100)).astype(floatX)
+        result = net_no_conv.get_output('output', X)
+        expected = net_no_conv.predict_proba(X)
+        np.testing.assert_equal(result, expected)
+
+
 class TestMultiInputFunctional:
     @pytest.fixture(scope='session')
     def net(self, NeuralNet):
@@ -682,3 +765,23 @@ class TestMultiInputFunctional:
         X, y = mnist
         y_test = y[60000:]
         assert accuracy_score(y_pred, y_test) > 0.85
+
+
+class TestGradScale:
+    @pytest.fixture
+    def grad_scale(self):
+        from nolearn.lasagne import grad_scale
+        return grad_scale
+
+    @pytest.mark.parametrize("layer", [
+        BatchNormLayer(InputLayer((None, 16))),
+        Conv2DLayer(InputLayer((None, 1, 28, 28)), 2, 3),
+        DenseLayer(InputLayer((None, 16)), 16),
+        ])
+    def test_it(self, grad_scale, layer):
+        layer2 = grad_scale(layer, 0.33)
+        assert layer2 is layer
+        for param in layer.get_params(trainable=True):
+            np.testing.assert_almost_equal(param.tag.grad_scale, 0.33)
+        for param in layer.get_params(trainable=False):
+            assert hasattr(param.tag, 'grad_scale') is False

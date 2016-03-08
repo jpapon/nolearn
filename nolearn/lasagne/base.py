@@ -22,6 +22,7 @@ from lasagne.objectives import aggregate
 from lasagne.objectives import categorical_crossentropy
 from lasagne.objectives import squared_error
 from lasagne.updates import nesterov_momentum
+from lasagne.utils import floatX
 from lasagne.utils import unique
 import numpy as np
 from sklearn.base import BaseEstimator
@@ -78,10 +79,20 @@ class Layers(OrderedDict):
 
 
 class BatchIterator(object):
-    def __init__(self, batch_size):
+    def __init__(self, batch_size, shuffle=False, seed=42):
         self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.random = np.random.RandomState(seed)
 
     def __call__(self, X, y=None):
+        if self.shuffle:
+            X0 = X
+            if isinstance(X, dict):
+                X0 = list(X.values())[0]
+            indices = self.random.permutation(np.arange(X0.shape[0]))
+            X = _sldict(X, indices)
+            if y is not None:
+                y = y[indices]
         self.X, self.y = X, y
         return self
 
@@ -113,6 +124,12 @@ class BatchIterator(object):
             if attr in state:
                 del state[attr]
         return state
+
+
+def grad_scale(layer, scale):
+    for param in layer.get_params(trainable=True):
+        param.tag.grad_scale = floatX(scale)
+    return layer
 
 
 class TrainSplit(object):
@@ -252,6 +269,7 @@ def objective(layers,
 
 class NeuralNet(BaseEstimator):
     """A scikit-learn estimator based on Lasagne.
+
     """
     def __init__(
         self,
@@ -268,7 +286,7 @@ class NeuralNet(BaseEstimator):
         prediction_transform=T.nnet.softmax,
         max_epochs=100,
         train_split=TrainSplit(eval_size=0.2),
-        custom_score=None,
+        custom_scores=None,
         X_tensor_type=None,
         y_tensor_type=None,
         use_label_encoder=False,
@@ -286,6 +304,32 @@ class NeuralNet(BaseEstimator):
         validation_plot_func = None,
         **kwargs
         ):
+        """:param layers: A list of lasagne layers to compose into the final
+                          neural net
+
+        :param on_epoch_finished: A list of functions which are called
+                                 after every epoch.  The functions
+                                 will be passed the NeuralNet as the
+                                 first parameter and its
+                                 train_history_ attribute as the
+                                 second parameter.
+
+        :param on_training_started: A list of functions which are
+                                    called after training has started.
+                                    The functions will be passed the
+                                    NeuralNet as the first parameter
+                                    and its train_history_ attribute
+                                    as the second parameter.
+
+        :param on_training_finished: A list of functions which are
+                                     called after training is
+                                     finished.  The functions will be
+                                     passed the NeuralNet as the first
+                                     parameter and its train_history_
+                                     attribute as the second
+                                     parameter.
+
+        """
         if loss is not None:
             raise ValueError(
                 "The 'loss' parameter was removed, please use "
@@ -322,13 +366,29 @@ class NeuralNet(BaseEstimator):
                 "The 'X_tensor_type' parameter has been removed. "
                 "It's unnecessary.")  # BBB
 
+        if 'custom_score' in kwargs:
+            warn("The 'custom_score' argument has been deprecated, please use "
+                 "the 'custom_scores' parameter instead, which is just "
+                 "a list of custom scores e.g.\n"
+                 "custom_scores=[('first output', lambda y1, y2: abs(y1[0,0]-y2[0,0])), ('second output', lambda y1,y2: abs(y1[0,1]-y2[0,1]))]")
+
+            # add it to custom_scores
+            if custom_scores is None:
+                custom_scores = [kwargs.pop('custom_score')]
+            else:
+                custom_scores.append(kwargs.pop('custom_score'))
+
         if isinstance(layers, Layer):
             layers = _list([layers])
+<<<<<<< HEAD
         if (validation_plot_func is not None):
             self.validation_plot_func = validation_plot_func
         else:
             self.validation_plot_func = self.plot_validation_output
 
+=======
+
+>>>>>>> e7f57cbbeabc42e48df04e9b4b791ac687b1496a
         self.layers = layers
         self.update = update
         self.objective = objective
@@ -344,7 +404,7 @@ class NeuralNet(BaseEstimator):
         self.regression = regression
         self.max_epochs = max_epochs
         self.train_split = train_split
-        self.custom_score = custom_score
+        self.custom_scores = custom_scores
         self.y_tensor_type = y_tensor_type
         self.use_label_encoder = use_label_encoder
         self.y_transform = y_transform
@@ -530,12 +590,6 @@ class NeuralNet(BaseEstimator):
         input_layers = [layer for layer in layers.values()
                         if isinstance(layer, InputLayer)]
 
-        X_inputs = [theano.Param(input_layer.input_var, name=input_layer.name)
-                    for input_layer in input_layers]
-        inputs = X_inputs + [theano.Param(y_batch, name="y")]
-
-
-
         loss_train = objective(
             layers, prediction_transform = self.prediction_transform, target=y_batch, **objective_kw)
         loss_eval = objective(
@@ -548,12 +602,18 @@ class NeuralNet(BaseEstimator):
             accuracy = loss_eval
 
         all_params = self.get_all_params(trainable=True)
+        grads = theano.grad(loss_train, all_params)
+        for idx, param in enumerate(all_params):
+            grad_scale = getattr(param.tag, 'grad_scale', 1)
+            if grad_scale != 1:
+                grads[idx] *= grad_scale
         update_params = self._get_params_for('update')
-        updates = update(loss_train, all_params, **update_params)
+        updates = update(grads, all_params, **update_params)
 
 
-
-
+        X_inputs = [theano.In(input_layer.input_var, name=input_layer.name)
+                    for input_layer in input_layers]
+        inputs = X_inputs + [theano.In(y_batch, name="y")]
 
         train_iter = theano.function(
             inputs=inputs,
@@ -641,7 +701,10 @@ class NeuralNet(BaseEstimator):
             train_losses = []
             valid_losses = []
             valid_accuracies = []
-            custom_score = []
+            if self.custom_scores:
+                custom_scores = [[] for _ in self.custom_scores]
+            else:
+                custom_scores = []
 
             t0 = time()
 
@@ -664,16 +727,18 @@ class NeuralNet(BaseEstimator):
                 valid_losses.append(batch_valid_loss)
                 valid_accuracies.append(accuracy)
 
-                if self.custom_score:
+                if self.custom_scores:
                     y_prob = self.apply_batch_func(self.predict_iter_, Xb)
-                    custom_score.append(self.custom_score[1](yb, y_prob))
+                    for custom_scorer, custom_score in zip(self.custom_scores, custom_scores):
+                        custom_score.append(custom_scorer[1](yb, y_prob))
+                    #custom_score.append(self.custom_score[1](yb, y_prob))
             valid_time = time() - t1
 
             avg_train_loss = np.mean(train_losses)
             avg_valid_loss = np.mean(valid_losses)
             avg_valid_accuracy = np.mean(valid_accuracies)
-            if custom_score:
-                avg_custom_score = np.mean(custom_score)
+            if custom_scores:
+                avg_custom_scores = np.mean(custom_scores, axis=1)
 
             if avg_train_loss < best_train_loss:
                 best_train_loss = avg_train_loss
@@ -690,8 +755,9 @@ class NeuralNet(BaseEstimator):
                 'train_dur': train_time,
                 'val_dur': valid_time,
                 }
-            if self.custom_score:
-                info[self.custom_score[0]] = avg_custom_score
+            if self.custom_scores:
+                for index, custom_score in enumerate(self.custom_scores):
+                    info[custom_score[0]] = avg_custom_scores[index]
             self.train_history_.append(info)
 
             try:
@@ -750,6 +816,27 @@ class NeuralNet(BaseEstimator):
     #        if self.use_label_encoder:
     #            y_pred = self.enc_.inverse_transform(y_pred)
     #        return y_pred
+
+    def get_output(self, layer, X):
+        if isinstance(layer, basestring):
+            layer = self.layers_[layer]
+
+        fn_cache = getattr(self, '_get_output_fn_cache', None)
+        if fn_cache is None:
+            fn_cache = {}
+            self._get_output_fn_cache = fn_cache
+
+        if layer not in fn_cache:
+            xs = self.layers_[0].input_var.type()
+            get_activity = theano.function([xs], get_output(layer, xs))
+            fn_cache[layer] = get_activity
+        else:
+            get_activity = fn_cache[layer]
+
+        outputs = []
+        for Xb, yb in self.batch_iterator_test(X):
+            outputs.append(get_activity(Xb))
+        return np.vstack(outputs)
 
     def score(self, X, y):
         score = mean_squared_error if self.regression else accuracy_score
@@ -830,6 +917,7 @@ class NeuralNet(BaseEstimator):
             'eval_iter_',
             'predict_iter_',
             '_initialized',
+            '_get_output_fn_cache',
             ):
             if attr in state:
                 del state[attr]
