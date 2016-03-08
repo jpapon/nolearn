@@ -46,8 +46,8 @@ class PrintLog:
         if nn.custom_score:
             info_tabulate[nn.custom_score[0]] = info[nn.custom_score[0]]
 
-        info_tabulate['dur'] = "{:.2f}s".format(info['dur'])
-
+        info_tabulate['train_dur'] = "{:.3f}s".format(info['train_dur'])
+        info_tabulate['val_dur'] = "{:.3f}s".format(info['val_dur'])
         tabulated = tabulate(
             [info_tabulate], headers="keys", floatfmt='.5f')
 

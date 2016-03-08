@@ -8,10 +8,15 @@ import itertools
 from warnings import warn
 from time import time
 
+import lasagne
 from lasagne.layers import get_all_layers
 from lasagne.layers import get_output
 from lasagne.layers import InputLayer
 from lasagne.layers import Layer
+from lasagne.layers import InverseLayer
+from lasagne.layers import BatchNormLayer, batch_norm
+from lasagne.layers.dnn import Conv2DDNNLayer
+
 from lasagne import regularization
 from lasagne.objectives import aggregate
 from lasagne.objectives import categorical_crossentropy
@@ -27,6 +32,13 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import LabelEncoder
 import theano
 from theano import tensor as T
+
+import matplotlib.pyplot as plt
+from matplotlib import figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib as mpl
+from collections import namedtuple
+import os
 
 from . import PrintLog
 from . import PrintLayerInfo
@@ -136,24 +148,105 @@ class LegacyTrainTestSplit(object):  # BBB
 def objective(layers,
               loss_function,
               target,
+              prediction_transform,
               aggregate=aggregate,
+              weights = None,
               deterministic=False,
               l1=0,
               l2=0,
-              get_output_kw=None):
+              get_output_kw=None ):
     if get_output_kw is None:
         get_output_kw = {}
     output_layer = layers[-1]
+
+    ###################
+    #test_input = np.random.rand(8,1,512,512).astype(np.float32)
+    #num_pix = test_input.shape[0]*test_input.shape[2]*test_input.shape[3]
+    #layers[0].input_var.tag.test_value = test_input
+    ###############
+    #print ("Input shape = {}".format(layers[0].input_var.tag.test_value.shape))
+
     network_output = get_output(
         output_layer, deterministic=deterministic, **get_output_kw)
-    loss = aggregate(loss_function(network_output, target))
 
-    if l1:
-        loss += regularization.regularize_layer_params(
-            layers.values(), regularization.l1) * l1
-    if l2:
-        loss += regularization.regularize_layer_params(
-            layers.values(), regularization.l2) * l2
+    #print ("Network output shape={}".format(network_output.tag.test_value.shape))
+
+    ###################
+    #test_y = np.random.randint (0,3,(test_input.shape[0],test_input.shape[2],test_input.shape[3]))
+    #test_y = np.zeros((test_input.shape[0],test_input.shape[2],test_input.shape[3]))
+    #test_y = test_y.astype(np.int32)
+    #target.tag.test_value = test_y
+    ###############
+
+    #flattened_target =target.flatten()
+    #print ("Target shape={}".format(target.tag.test_value.shape))
+
+    '''
+    print ("OUTPUTS")
+    img = 0
+    x = 2
+    y = 2
+    pixel = y*4 + x
+    imgpixel = pixel + img*16
+    network_output.tag.test_value[img, 1, x,y] = 10.0
+    target.tag.test_value[img,x,y] = 2
+    network_output.tag.test_value[img, 1, x+1,y] = 10.0
+    target.tag.test_value[img,x+1,y] = 2
+    print ("target ={}".format(target.tag.test_value[img,x,y]))
+    print ("flat target={}".format(flattened_target.tag.test_value[imgpixel]))
+    print ("Orig={}".format(network_output.tag.test_value[img, 0:38, x,y]))
+
+    reshaped_predictions = network_output.flatten(3)
+    print ("reshaped_predictions shape={}".format(reshaped_predictions.tag.test_value.shape))
+    print ("Flattened={}".format(reshaped_predictions.tag.test_value[img, 0:38, pixel]))
+
+    shuffled = reshaped_predictions.dimshuffle((1,0,2))
+    print ("shuffled shape={}".format(shuffled.tag.test_value.shape))
+    print ("shuffled={}".format(shuffled.tag.test_value[0:38,img,pixel]))
+
+    flattened = shuffled.flatten(2)
+    print ("flattened shape={}".format(flattened.tag.test_value.shape))
+    print ("flattened2={}".format(flattened.tag.test_value[0:38,imgpixel]))
+
+    shuffled2 = flattened.dimshuffle((1,0))
+    print ("shuffled2 shape={}".format(shuffled2.tag.test_value.shape))
+    print ("shuffled2={}".format(shuffled2.tag.test_value[imgpixel,0:38]))
+    '''
+
+    if (prediction_transform is not None):
+        reshaped_predictions = network_output.flatten(3).dimshuffle((1,0,2)).flatten(2).dimshuffle((1,0))
+        predictions = prediction_transform(reshaped_predictions)
+        #print ("Transformed output shape={}".format(predictions.tag.test_value.shape))
+        target = target.flatten()
+        #print ("Flattened Target shape={}".format(target.tag.test_value.shape))
+    else:
+        predictions = network_output
+
+
+    if (weights is not None):
+       weight_vals = weights[target]
+       loss = aggregate(loss_function(predictions, target),weights=weight_vals, mode ='normalized_sum')
+
+    else:
+        loss = aggregate(loss_function(predictions, target),mode='mean')
+
+
+
+
+
+    #print (weight_vals.tag.test_value)
+    #T.inc_subtensor (weight_vals[:],weights[flattened_target],inplace=True)
+    #print("Test loss ={}".format(loss.tag.test_value))
+
+
+    if l1 > 0:
+        loss += regularization.regularize_network_params(
+            layers[-1], regularization.l1) * l1
+    if l2 > 0:
+        loss += regularization.regularize_network_params(
+            layers[-1], regularization.l2) * l2
+
+    #print ("With regularization ={}".format(loss.tag.test_value))
     return loss
 
 
@@ -167,21 +260,30 @@ class NeuralNet(BaseEstimator):
         loss=None,  # BBB
         objective=objective,
         objective_loss_function=None,
+        objective_weights= None,
         batch_iterator_train=BatchIterator(batch_size=128),
-        batch_iterator_test=BatchIterator(batch_size=128),
+        batch_iterator_valid=BatchIterator(batch_size=128),
+        batch_iterator_test=BatchIterator(batch_size=16),
         regression=False,
+        prediction_transform=T.nnet.softmax,
         max_epochs=100,
         train_split=TrainSplit(eval_size=0.2),
         custom_score=None,
         X_tensor_type=None,
         y_tensor_type=None,
         use_label_encoder=False,
+        y_transform=None,
         on_batch_finished=None,
         on_epoch_finished=None,
         on_training_started=None,
         on_training_finished=None,
         more_params=None,
         verbose=0,
+        validation_output_folder = None,
+        cmap =plt.get_cmap('hsv'),
+        norm = None,
+        label_list = None,
+        validation_plot_func = None,
         **kwargs
         ):
         if loss is not None:
@@ -222,24 +324,36 @@ class NeuralNet(BaseEstimator):
 
         if isinstance(layers, Layer):
             layers = _list([layers])
+        if (validation_plot_func is not None):
+            self.validation_plot_func = validation_plot_func
+        else:
+            self.validation_plot_func = self.plot_validation_output
 
         self.layers = layers
         self.update = update
         self.objective = objective
         self.objective_loss_function = objective_loss_function
+        if (objective_weights is not None):
+            self.objective_weights = T.as_tensor_variable(objective_weights)
+        else:
+            self.objective_weights = objective_weights
+
         self.batch_iterator_train = batch_iterator_train
         self.batch_iterator_test = batch_iterator_test
+        self.batch_iterator_valid = batch_iterator_valid
         self.regression = regression
         self.max_epochs = max_epochs
         self.train_split = train_split
         self.custom_score = custom_score
         self.y_tensor_type = y_tensor_type
         self.use_label_encoder = use_label_encoder
+        self.y_transform = y_transform
         self.on_batch_finished = on_batch_finished or []
         self.on_epoch_finished = on_epoch_finished or []
         self.on_training_started = on_training_started or []
         self.on_training_finished = on_training_finished or []
         self.more_params = more_params or {}
+        self.prediction_transform = prediction_transform
         self.verbose = verbose
         if self.verbose:
             # XXX: PrintLog should come before any other handlers,
@@ -252,9 +366,13 @@ class NeuralNet(BaseEstimator):
             assert not hasattr(self, key)
         vars(self).update(kwargs)
         self._kwarg_keys = list(kwargs.keys())
-
+        self.validation_output_folder = validation_output_folder
+        if (self.validation_output_folder is not None) and (not os.path.exists(self.validation_output_folder)):
+            os.makedirs(self.validation_output_folder)
         self.train_history_ = []
-
+        self.cmap = cmap
+        self.norm = norm
+        self.label_list = label_list
         if 'batch_iterator' in kwargs:  # BBB
             raise ValueError(
                 "The 'batch_iterator' argument has been replaced. "
@@ -340,6 +458,7 @@ class NeuralNet(BaseEstimator):
                         "instance object as the 'layers' parameter of "
                         "'NeuralNet'."
                         )
+                print ("Layer {} output shape: {}".format(name,layer.output_shape))
             return self.layers[0]
 
         # 'self.layers' are a list of '(Layer class, kwargs)', so
@@ -348,14 +467,9 @@ class NeuralNet(BaseEstimator):
         layer = None
         for i, layer_def in enumerate(self.layers):
 
-            if isinstance(layer_def[0], basestring):
-                # The legacy format: ('name', Layer)
-                layer_name, layer_factory = layer_def
-                layer_kw = {'name': layer_name}
-            else:
-                # New format: (Layer, {'layer': 'kwargs'})
-                layer_factory, layer_kw = layer_def
-                layer_kw = layer_kw.copy()
+            # New format: (Layer, {'layer': 'kwargs'})
+            layer_factory, layer_kw = layer_def
+            layer_kw = layer_kw.copy()
 
             if 'name' not in layer_kw:
                 layer_kw['name'] = self._layer_name(layer_factory, i)
@@ -380,6 +494,12 @@ class NeuralNet(BaseEstimator):
                 else:
                     layer_kw['incoming'] = layer
 
+            if issubclass(layer_factory, InverseLayer):
+                if 'layer' in layer_kw:
+                    layer_kw['layer'] = self.layers_[layer_kw['layer']]
+                else:
+                    layer_kw['layer'] = layer
+
             for attr in ('W', 'b'):
                 if isinstance(layer_kw.get(attr), str):
                     name = layer_kw[attr]
@@ -393,11 +513,12 @@ class NeuralNet(BaseEstimator):
                        "Maybe parameter names have changed?".format(
                            layer_factory, layer_kw))
                 chain_exception(TypeError(msg), e)
+
             self.layers_[layer_kw['name']] = layer
             if layer_wrapper is not None:
                 layer = layer_wrapper(layer)
                 self.layers_["LW_%s" % layer_kw['name']] = layer
-
+            #print (layer.output_shape)
         return layer
 
     def _create_iter_funcs(self, layers, objective, update, output_type):
@@ -406,10 +527,19 @@ class NeuralNet(BaseEstimator):
         output_layer = layers[-1]
         objective_kw = self._get_params_for('objective')
 
+        input_layers = [layer for layer in layers.values()
+                        if isinstance(layer, InputLayer)]
+
+        X_inputs = [theano.Param(input_layer.input_var, name=input_layer.name)
+                    for input_layer in input_layers]
+        inputs = X_inputs + [theano.Param(y_batch, name="y")]
+
+
+
         loss_train = objective(
-            layers, target=y_batch, **objective_kw)
+            layers, prediction_transform = self.prediction_transform, target=y_batch, **objective_kw)
         loss_eval = objective(
-            layers, target=y_batch, deterministic=True, **objective_kw)
+            layers, prediction_transform = self.prediction_transform, target=y_batch, deterministic=True, **objective_kw)
         predict_proba = get_output(output_layer, None, deterministic=True)
         if not self.regression:
             predict = predict_proba.argmax(axis=1)
@@ -421,12 +551,9 @@ class NeuralNet(BaseEstimator):
         update_params = self._get_params_for('update')
         updates = update(loss_train, all_params, **update_params)
 
-        input_layers = [layer for layer in layers.values()
-                        if isinstance(layer, InputLayer)]
 
-        X_inputs = [theano.Param(input_layer.input_var, name=input_layer.name)
-                    for input_layer in input_layers]
-        inputs = X_inputs + [theano.Param(y_batch, name="y")]
+
+
 
         train_iter = theano.function(
             inputs=inputs,
@@ -448,13 +575,19 @@ class NeuralNet(BaseEstimator):
         return train_iter, eval_iter, predict_iter
 
     def fit(self, X, y, epochs=None):
-        X, y = self._check_good_input(X, y)
+        if (X is not None):
+            X, y = self._check_good_input(X, y)
 
-        if self.use_label_encoder:
-            self.enc_ = LabelEncoder()
-            y = self.enc_.fit_transform(y).astype(np.int32)
-            self.classes_ = self.enc_.classes_
-        self.initialize()
+            if self.use_label_encoder:
+                self.enc_ = LabelEncoder()
+                y = self.enc_.fit_transform(y).astype(np.int32)
+                self.classes_ = self.enc_.classes_
+            self.initialize()
+
+            if self.y_transform is not None:
+                print ("Shape before:{}".format(y.shape))
+                y = self.y_transform(y)
+                print ("Shape after:{}".format(y.shape))
 
         try:
             self.train_loop(X, y, epochs=epochs)
@@ -467,7 +600,10 @@ class NeuralNet(BaseEstimator):
 
     def train_loop(self, X, y, epochs=None):
         epochs = epochs or self.max_epochs
-        X_train, X_valid, y_train, y_valid = self.train_split(X, y, self)
+        if (X is not None):
+            X_train, X_valid, y_train, y_valid = self.train_split(X, y, self)
+        else:
+            X_train = y_train = X_valid = y_valid = None
 
         on_batch_finished = self.on_batch_finished
         if not isinstance(on_batch_finished, (list, tuple)):
@@ -510,14 +646,19 @@ class NeuralNet(BaseEstimator):
             t0 = time()
 
             for Xb, yb in self.batch_iterator_train(X_train, y_train):
+                if self.y_transform is not None:
+                    yb = self.y_transform(yb)
                 batch_train_loss = self.apply_batch_func(
                     self.train_iter_, Xb, yb)
                 train_losses.append(batch_train_loss)
 
                 for func in on_batch_finished:
                     func(self, self.train_history_)
-
-            for Xb, yb in self.batch_iterator_test(X_valid, y_valid):
+            train_time = time() - t0
+            t1 = time ()
+            for Xb, yb in self.batch_iterator_valid(X_valid, y_valid):
+                if self.y_transform is not None:
+                    yb = self.y_transform(yb)
                 batch_valid_loss, accuracy = self.apply_batch_func(
                     self.eval_iter_, Xb, yb)
                 valid_losses.append(batch_valid_loss)
@@ -526,6 +667,7 @@ class NeuralNet(BaseEstimator):
                 if self.custom_score:
                     y_prob = self.apply_batch_func(self.predict_iter_, Xb)
                     custom_score.append(self.custom_score[1](yb, y_prob))
+            valid_time = time() - t1
 
             avg_train_loss = np.mean(train_losses)
             avg_valid_loss = np.mean(valid_losses)
@@ -545,7 +687,8 @@ class NeuralNet(BaseEstimator):
                 'valid_loss': avg_valid_loss,
                 'valid_loss_best': best_valid_loss == avg_valid_loss,
                 'valid_accuracy': avg_valid_accuracy,
-                'dur': time() - t0,
+                'train_dur': train_time,
+                'val_dur': valid_time,
                 }
             if self.custom_score:
                 info[self.custom_score[0]] = avg_custom_score
@@ -554,6 +697,29 @@ class NeuralNet(BaseEstimator):
             try:
                 for func in on_epoch_finished:
                     func(self, self.train_history_)
+                if (self.validation_output_folder is not None):
+                    MAX_DISPLAY = 20
+                    predictions = []
+                    Xvals = []
+                    yvals = []
+                    for Xdisp, ydisp in self.batch_iterator_valid(X_valid, y_valid):
+                        predictions.append(self.predict (Xdisp[[0]])[0])
+                        if (len(predictions) >= MAX_DISPLAY):
+                            break
+                    for Xdisp, ydisp in self.batch_iterator_valid(use_norm = False):
+                        if self.y_transform is not None:
+                            ydisp = self.y_transform(ydisp)
+                        Xvals.append(Xdisp[0])
+                        yvals.append(ydisp[0])
+                        if (len(Xvals) >= MAX_DISPLAY):
+                            break
+
+
+                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                    self.validation_plot_func(self=dummy_self, Xb = np.array(Xvals), yb = yvals,p_out=predictions,epoch=(num_epochs_past + epoch), output_folder= self.validation_output_folder)
+                filename = os.path.join(self.validation_output_folder, 'epoch_{:04d}'.format(num_epochs_past + epoch))
+                self.write_model_data (filename)
             except StopIteration:
                 break
 
@@ -577,13 +743,13 @@ class NeuralNet(BaseEstimator):
         return np.vstack(probas)
 
     def predict(self, X):
-        if self.regression:
-            return self.predict_proba(X)
-        else:
-            y_pred = np.argmax(self.predict_proba(X), axis=1)
-            if self.use_label_encoder:
-                y_pred = self.enc_.inverse_transform(y_pred)
-            return y_pred
+        #if self.regression:
+        return self.predict_proba(X)
+        #else:
+    #        y_pred = np.argmax(self.predict_proba(X), axis=1)
+    #        if self.use_label_encoder:
+    #            y_pred = self.enc_.inverse_transform(y_pred)
+    #        return y_pred
 
     def score(self, X, y):
         score = mean_squared_error if self.regression else accuracy_score
@@ -687,3 +853,64 @@ class NeuralNet(BaseEstimator):
         # This allows us to have **kwargs in __init__ (woot!):
         param_names = super(NeuralNet, self)._get_param_names()
         return param_names + self._kwarg_keys
+
+
+    def read_model_data(self, filename):
+        """Unpickles and loads parameters into a Lasagne model."""
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        lasagne.layers.set_all_param_values(self.layers_[-1], data)
+
+
+    def write_model_data(self, filename):
+        """Pickels the parameters within a Lasagne model."""
+        data = lasagne.layers.get_all_param_values(self.layers_[-1])
+        with open(filename, 'wb') as f:
+            pickle.dump(data, f)
+
+    def plot_validation_output(self,Xb,yb,p_out,epoch_idx,output_folder):
+      indices_to_disp = list(range(Xb.shape[0]))
+      y_out = np.argmax(p_out,axis=1)
+      num_subplots = 12
+      num_rows = 4
+      num_cols = 4
+      nn_out_norm = mpl.colors.Normalize(vmin=-10.,vmax=10.)
+      for index_to_disp in indices_to_disp:
+        fig = figure.Figure (figsize=(5*num_cols,5*num_rows))
+        canvas = FigureCanvas(fig)
+        ax1 = fig.add_subplot(num_rows,num_cols,1)
+        ax1.imshow(np.squeeze(np.rollaxis(Xb[index_to_disp,:],0,3)), cmap = mpl.cm.Greys_r)
+        ax1.set_title("Input Image")
+
+        ax2 = fig.add_subplot(num_rows,num_cols,2)
+        gt_im = ax2.imshow(yb[index_to_disp],cmap=self.cmap,  norm=self.norm)
+        ax2.set_title("GT Labels")
+
+        ax3 = fig.add_subplot(num_rows,num_cols,3)
+        out_im = ax3.imshow(y_out[index_to_disp],cmap=self.cmap, norm=self.norm)
+        ax3.set_title("Predicted Labels")
+
+        resp_idx = 0
+        labels_to_disp = [0,1,2,22,4,5,6,7,8,9,11,18]
+        # cityscapes[0,1,6,7,8,11,12,23,26,24,27,20]
+        #sunrgbd [0,1,2,22,4,5,6,7,8,9,11,18]
+        for r in range(1,num_rows):
+            for c in range (num_cols):
+                ax = fig.add_subplot(num_rows,num_cols,num_cols*r+c+1)
+                out_hm = ax.imshow(p_out[index_to_disp][labels_to_disp[resp_idx]],norm=nn_out_norm)
+                ax.set_title(self.label_list[labels_to_disp[resp_idx]]+" Response")
+                resp_idx+=1
+
+
+        fig.subplots_adjust(right=0.95)
+        cbar_ax = fig.add_axes([0.96, 0.1, 0.03, 0.8])
+
+        cbar = fig.colorbar(gt_im, cax=cbar_ax, ticks = np.array(list(range(len(self.label_list))))+0.5)
+        temp = cbar.ax.set_yticklabels(list(self.label_list))
+
+        cbar_ax2 = fig.add_axes([0.85, 0.72, 0.03, 0.18])
+        cbar2 = fig.colorbar(out_hm, cax=cbar_ax2)
+
+        filename = os.path.join(output_folder, '{:06d}_{:04d}.png'.format(epoch_idx,index_to_disp))
+        canvas.print_figure(filename, bbox_inches='tight')
+        plt.close(fig)
