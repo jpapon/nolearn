@@ -380,15 +380,11 @@ class NeuralNet(BaseEstimator):
 
         if isinstance(layers, Layer):
             layers = _list([layers])
-<<<<<<< HEAD
         if (validation_plot_func is not None):
             self.validation_plot_func = validation_plot_func
         else:
             self.validation_plot_func = self.plot_validation_output
 
-=======
-
->>>>>>> e7f57cbbeabc42e48df04e9b4b791ac687b1496a
         self.layers = layers
         self.update = update
         self.objective = objective
