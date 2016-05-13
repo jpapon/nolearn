@@ -18,12 +18,16 @@ class PrintLog:
     def __init__(self):
         self.first_iteration = True
 
-    def __call__(self, nn, train_history):
-        print(self.table(nn, train_history))
+    def __call__(self, nn, train_history, full=False):
+        if (full == False):
+            print(self.table(nn, train_history,-1))
+        else:
+            for i in range(len (train_history)):
+                print(self.table(nn, train_history,i))
         sys.stdout.flush()
 
-    def table(self, nn, train_history):
-        info = train_history[-1]
+    def table(self, nn, train_history,index):
+        info = train_history[index]
 
         info_tabulate = OrderedDict([
             ('epoch', info['epoch']),
@@ -49,6 +53,8 @@ class PrintLog:
 
         info_tabulate['train_dur'] = "{:.3f}s".format(info['train_dur'])
         info_tabulate['val_dur'] = "{:.3f}s".format(info['val_dur'])
+        info_tabulate['img_dur'] = "{:.3f}s".format(info['img_dur'])
+        info_tabulate['total_dur'] = "{:.3f}s".format(info['total_dur'])
         tabulated = tabulate(
             [info_tabulate], headers="keys", floatfmt='.5f')
 
@@ -60,6 +66,8 @@ class PrintLog:
 
         out += tabulated.rsplit('\n', 1)[-1]
         return out
+
+
 
 
 class SaveWeights:

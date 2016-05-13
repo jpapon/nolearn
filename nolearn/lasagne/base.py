@@ -22,6 +22,7 @@ from lasagne.objectives import aggregate
 from lasagne.objectives import categorical_crossentropy
 from lasagne.objectives import squared_error
 from lasagne.updates import nesterov_momentum
+from lasagne.updates import adam
 from lasagne.utils import floatX
 from lasagne.utils import unique
 import numpy as np
@@ -40,6 +41,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib as mpl
 from collections import namedtuple
 import os
+import h5py
 
 from . import PrintLog
 from . import PrintLayerInfo
@@ -590,9 +592,11 @@ class NeuralNet(BaseEstimator):
             layers, prediction_transform = self.prediction_transform, target=y_batch, **objective_kw)
         loss_eval = objective(
             layers, prediction_transform = self.prediction_transform, target=y_batch, deterministic=True, **objective_kw)
+        self.loss_eval_ = loss_eval
+        
         predict_proba = get_output(output_layer, None, deterministic=True)
         if not self.regression:
-            predict = predict_proba.argmax(axis=1)
+            predict = T.argmax(predict_proba,axis=1, keepdims = True)
             accuracy = T.mean(T.eq(predict, y_batch))
         else:
             accuracy = loss_eval
@@ -691,6 +695,7 @@ class NeuralNet(BaseEstimator):
 
         num_epochs_past = len(self.train_history_)
 
+        PrintLog()
         while epoch < epochs:
             epoch += 1
 
@@ -702,9 +707,13 @@ class NeuralNet(BaseEstimator):
             else:
                 custom_scores = []
 
-            t0 = time()
-
-            for Xb, yb in self.batch_iterator_train(X_train, y_train):
+            t_train = 0
+            t_val = 0
+            t_get_img = 0
+            t_start = time()
+            for Xb, yb, dt, names in self.batch_iterator_train(X_train, y_train):
+                t_get_img += dt
+                t_start_train = time()
                 if self.y_transform is not None:
                     yb = self.y_transform(yb)
                 batch_train_loss = self.apply_batch_func(
@@ -713,9 +722,11 @@ class NeuralNet(BaseEstimator):
 
                 for func in on_batch_finished:
                     func(self, self.train_history_)
-            train_time = time() - t0
-            t1 = time ()
-            for Xb, yb in self.batch_iterator_valid(X_valid, y_valid):
+                t_train += time() - t_start_train
+
+            for Xb, yb, dt,names in self.batch_iterator_valid(X_valid, y_valid):
+                t_get_img += dt
+                t_start_val = time()
                 if self.y_transform is not None:
                     yb = self.y_transform(yb)
                 batch_valid_loss, accuracy = self.apply_batch_func(
@@ -727,9 +738,7 @@ class NeuralNet(BaseEstimator):
                     y_prob = self.apply_batch_func(self.predict_iter_, Xb)
                     for custom_scorer, custom_score in zip(self.custom_scores, custom_scores):
                         custom_score.append(custom_scorer[1](yb, y_prob))
-                    #custom_score.append(self.custom_score[1](yb, y_prob))
-            valid_time = time() - t1
-
+                t_val += time() - t_start_val
             avg_train_loss = np.mean(train_losses)
             avg_valid_loss = np.mean(valid_losses)
             avg_valid_accuracy = np.mean(valid_accuracies)
@@ -741,49 +750,51 @@ class NeuralNet(BaseEstimator):
             if avg_valid_loss < best_valid_loss:
                 best_valid_loss = avg_valid_loss
 
-            info = {
-                'epoch': num_epochs_past + epoch,
-                'train_loss': avg_train_loss,
-                'train_loss_best': best_train_loss == avg_train_loss,
-                'valid_loss': avg_valid_loss,
-                'valid_loss_best': best_valid_loss == avg_valid_loss,
-                'valid_accuracy': avg_valid_accuracy,
-                'train_dur': train_time,
-                'val_dur': valid_time,
-                }
-            if self.custom_scores:
-                for index, custom_score in enumerate(self.custom_scores):
-                    info[custom_score[0]] = avg_custom_scores[index]
-            self.train_history_.append(info)
+
 
             try:
+                if (self.validation_output_folder is not None):
+                    if (epoch % 1 == 0):
+                        MAX_DISPLAY = 8
+                        predictions = []
+                        for idx, (Xdisp, ydisp,dt,names) in enumerate(self.batch_iterator_valid(X_valid, y_valid, use_norm = False)):
+                            Xb,yb = self.batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
+                            predictions = self.predict (Xb)
+
+                            DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                            dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                            self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.validation_output_folder)
+                            if (idx >= MAX_DISPLAY):
+                                break
+
+                    filename = os.path.join(self.validation_output_folder, 'epoch_{:04d}'.format(num_epochs_past + epoch))
+                    self.write_model_data_hdf5 (filename)
+
+                t_total = time() - t_start
+
+                info = {
+                    'epoch': num_epochs_past + epoch,
+                    'train_loss': avg_train_loss,
+                    'train_loss_best': best_train_loss == avg_train_loss,
+                    'valid_loss': avg_valid_loss,
+                    'valid_loss_best': best_valid_loss == avg_valid_loss,
+                    'valid_accuracy': avg_valid_accuracy,
+                    'train_dur': t_train,
+                    'val_dur': t_val,
+                    'img_dur': t_get_img,
+                    'total_dur': t_total
+                    }
+                if self.custom_scores:
+                    for index, custom_score in enumerate(self.custom_scores):
+                        info[custom_score[0]] = avg_custom_scores[index]
+                self.train_history_.append(info)
                 for func in on_epoch_finished:
                     func(self, self.train_history_)
-                if (self.validation_output_folder is not None):
-                    MAX_DISPLAY = 20
-                    predictions = []
-                    Xvals = []
-                    yvals = []
-                    for Xdisp, ydisp in self.batch_iterator_valid(X_valid, y_valid):
-                        predictions.append(self.predict (Xdisp[[0]])[0])
-                        if (len(predictions) >= MAX_DISPLAY):
-                            break
-                    for Xdisp, ydisp in self.batch_iterator_valid(use_norm = False):
-                        if self.y_transform is not None:
-                            ydisp = self.y_transform(ydisp)
-                        Xvals.append(Xdisp[0])
-                        yvals.append(ydisp[0])
-                        if (len(Xvals) >= MAX_DISPLAY):
-                            break
 
-
-                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
-                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
-                    self.validation_plot_func(self=dummy_self, Xb = np.array(Xvals), yb = yvals,p_out=predictions,epoch=(num_epochs_past + epoch), output_folder= self.validation_output_folder)
-                filename = os.path.join(self.validation_output_folder, 'epoch_{:04d}'.format(num_epochs_past + epoch))
-                self.write_model_data (filename)
             except StopIteration:
                 break
+
+
 
         for func in on_training_finished:
             func(self, self.train_history_)
@@ -951,6 +962,46 @@ class NeuralNet(BaseEstimator):
         data = lasagne.layers.get_all_param_values(self.layers_[-1])
         with open(filename, 'wb') as f:
             pickle.dump(data, f)
+
+    def write_model_data_hdf5 (self, filename):
+        data = lasagne.layers.get_all_param_values(self.layers_[-1])
+        with h5py.File(filename+".hdf5","w") as h5file:
+            counter = 0
+            h5file.attrs["num_layers"] = len(data)
+            group = h5file.create_group("Layers")
+            for layer in data:
+              group.create_dataset("{:06d}".format(counter), data=layer,compression="lzf")
+              counter += 1
+            group = h5file.create_group("train_history")
+            for i,info in enumerate(self.train_history_):
+              info_group = group.create_group("{:04d}".format(i+1))
+              for key,val in info.items():
+                  info_group.create_dataset(key, data=val)
+
+
+    def read_model_data_hdf5 (self, filename):
+        read_data =[]
+        train_history = []
+        with h5py.File(filename,"r") as h5file:
+            num_layers = h5file.attrs["num_layers"]
+            group = h5file['Layers']
+            for counter in range(num_layers):
+              layer = group["{:06d}".format(counter)][:]
+              read_data.append(layer)
+            if ('train_history' in h5file):
+                group = h5file["train_history"]
+                info_groups = list (group)
+                train_history = [{}] * len(info_groups)
+                for info in info_groups:
+                  epoch_num = int(info)
+                  info = group[info]
+                  temp_dic = {}
+                  for key,val in info.items():
+                      temp_dic[key] = val[()]
+                  train_history [epoch_num-1] = temp_dic
+        self.train_history_ = train_history
+        lasagne.layers.set_all_param_values(self.layers_[-1], read_data)
+
 
     def plot_validation_output(self,Xb,yb,p_out,epoch_idx,output_folder):
       indices_to_disp = list(range(Xb.shape[0]))
