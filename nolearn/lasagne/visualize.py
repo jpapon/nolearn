@@ -10,12 +10,21 @@ import theano.tensor as T
 
 def plot_loss(net):
     train_loss = [row['train_loss'] for row in net.train_history_]
+    train_accuracy = [row['train_accuracy'] for row in net.train_history_]
+
     valid_loss = [row['valid_loss'] for row in net.train_history_]
+    valid_accuracy = [row['valid_accuracy'] for row in net.train_history_]
+
     plt.plot(train_loss, label='train loss')
+    plt.plot(train_accuracy, label='train_accuracy')
     plt.plot(valid_loss, label='valid loss')
+    plt.plot(valid_accuracy, label='valid_accuracy')
+
     plt.xlabel('epoch')
     plt.ylabel('loss')
-    plt.legend(loc='best')
+    l = plt.legend(loc='best')
+    for text in l.get_texts():
+        text.set_color("black")
     return plt
 
 

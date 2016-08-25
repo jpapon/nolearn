@@ -245,8 +245,9 @@ def objective(layers,
     if (weights is not None):
        weight_vals = weights[target]
        loss = aggregate(loss_function(predictions, target),weights=weight_vals, mode ='normalized_sum')
-
+       print ("Using weights")
     else:
+        print ("Not Using weights")
         loss = aggregate(loss_function(predictions, target),mode='mean')
 
 
@@ -300,10 +301,12 @@ class NeuralNet(BaseEstimator):
         more_params=None,
         verbose=0,
         validation_output_folder = None,
+        train_output = True,
         cmap =plt.get_cmap('hsv'),
         norm = None,
         label_list = None,
         validation_plot_func = None,
+	num_imgs_out = 1, 
         **kwargs
         ):
         """:param layers: A list of lasagne layers to compose into the final
@@ -382,10 +385,7 @@ class NeuralNet(BaseEstimator):
 
         if isinstance(layers, Layer):
             layers = _list([layers])
-        if (validation_plot_func is not None):
-            self.validation_plot_func = validation_plot_func
-        else:
-            self.validation_plot_func = self.plot_validation_output
+        self.validation_plot_func = validation_plot_func
 
         self.layers = layers
         self.update = update
@@ -427,10 +427,19 @@ class NeuralNet(BaseEstimator):
         self.validation_output_folder = validation_output_folder
         if (self.validation_output_folder is not None) and (not os.path.exists(self.validation_output_folder)):
             os.makedirs(self.validation_output_folder)
+
+        if (train_output == True):
+            self.train_output_folder = os.path.join ( self.validation_output_folder, 'training_out')
+        else:
+            self.train_output_folder = None
+        if (self.train_output_folder is not None) and (not os.path.exists(self.train_output_folder)):
+            os.makedirs(self.train_output_folder)
+
         self.train_history_ = []
         self.cmap = cmap
         self.norm = norm
         self.label_list = label_list
+        self.num_imgs_out = num_imgs_out
         if 'batch_iterator' in kwargs:  # BBB
             raise ValueError(
                 "The 'batch_iterator' argument has been replaced. "
@@ -516,7 +525,7 @@ class NeuralNet(BaseEstimator):
                         "instance object as the 'layers' parameter of "
                         "'NeuralNet'."
                         )
-                print ("Layer {} output shape: {}".format(name,layer.output_shape))
+                #print ("{} Layer {} output shape: {}".format(i,name,layer.output_shape))
             return self.layers[0]
 
         # 'self.layers' are a list of '(Layer class, kwargs)', so
@@ -524,7 +533,7 @@ class NeuralNet(BaseEstimator):
         # arguments:
         layer = None
         for i, layer_def in enumerate(self.layers):
-
+            print ("Initializing {} from kwargs".format(i))
             # New format: (Layer, {'layer': 'kwargs'})
             layer_factory, layer_kw = layer_def
             layer_kw = layer_kw.copy()
@@ -593,7 +602,7 @@ class NeuralNet(BaseEstimator):
         loss_eval = objective(
             layers, prediction_transform = self.prediction_transform, target=y_batch, deterministic=True, **objective_kw)
         self.loss_eval_ = loss_eval
-        
+
         predict_proba = get_output(output_layer, None, deterministic=True)
         if not self.regression:
             predict = T.argmax(predict_proba,axis=1, keepdims = True)
@@ -617,7 +626,7 @@ class NeuralNet(BaseEstimator):
 
         train_iter = theano.function(
             inputs=inputs,
-            outputs=[loss_train],
+            outputs=[loss_train, accuracy],
             updates=updates,
             allow_input_downcast=True,
             )
@@ -690,6 +699,7 @@ class NeuralNet(BaseEstimator):
             min([row['train_loss'] for row in self.train_history_]) if
             self.train_history_ else np.inf
             )
+        
         for func in on_training_started:
             func(self, self.train_history_)
 
@@ -700,6 +710,7 @@ class NeuralNet(BaseEstimator):
             epoch += 1
 
             train_losses = []
+            train_accuracies = []
             valid_losses = []
             valid_accuracies = []
             if self.custom_scores:
@@ -711,22 +722,34 @@ class NeuralNet(BaseEstimator):
             t_val = 0
             t_get_img = 0
             t_start = time()
-            for Xb, yb, dt, names in self.batch_iterator_train(X_train, y_train):
+            for idx, (Xdisp, ydisp, dt,names) in enumerate(self.batch_iterator_train(X_valid, y_valid,  use_norm = False)):
                 t_get_img += dt
                 t_start_train = time()
+                Xb,yb = self.batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
                 if self.y_transform is not None:
                     yb = self.y_transform(yb)
-                batch_train_loss = self.apply_batch_func(
+                batch_train_loss, batch_train_accuracy = self.apply_batch_func(
                     self.train_iter_, Xb, yb)
                 train_losses.append(batch_train_loss)
+                train_accuracies.append (batch_train_accuracy)
+
+                if (self.train_output_folder is not None and idx < self.num_imgs_out):
+                    predictions = self.predict (Xb)
+                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                    if (self.validation_plot_func is not None):
+                        self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.train_output_folder)
+                        if (idx >= self.num_imgs_out):
+                            break
 
                 for func in on_batch_finished:
                     func(self, self.train_history_)
                 t_train += time() - t_start_train
 
-            for Xb, yb, dt,names in self.batch_iterator_valid(X_valid, y_valid):
+            for idx, (Xdisp, ydisp, dt,names) in enumerate(self.batch_iterator_valid(X_valid, y_valid,  use_norm = False)):
                 t_get_img += dt
                 t_start_val = time()
+                Xb,yb = self.batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
                 if self.y_transform is not None:
                     yb = self.y_transform(yb)
                 batch_valid_loss, accuracy = self.apply_batch_func(
@@ -738,10 +761,21 @@ class NeuralNet(BaseEstimator):
                     y_prob = self.apply_batch_func(self.predict_iter_, Xb)
                     for custom_scorer, custom_score in zip(self.custom_scores, custom_scores):
                         custom_score.append(custom_scorer[1](yb, y_prob))
+
+                if (self.validation_output_folder is not None and idx < self.num_imgs_out):
+                    predictions = self.predict (Xb)
+                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                    if (self.validation_plot_func is not None):
+                        self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.validation_output_folder)
+                        if (idx >= self.num_imgs_out):
+                            break
+
                 t_val += time() - t_start_val
             avg_train_loss = np.mean(train_losses)
             avg_valid_loss = np.mean(valid_losses)
             avg_valid_accuracy = np.mean(valid_accuracies)
+            avg_train_accuracy = np.mean(train_accuracies)
             if custom_scores:
                 avg_custom_scores = np.mean(custom_scores, axis=1)
 
@@ -751,8 +785,8 @@ class NeuralNet(BaseEstimator):
                 best_valid_loss = avg_valid_loss
 
 
-
             try:
+                '''
                 if (self.validation_output_folder is not None):
                     if (epoch % 1 == 0):
                         MAX_DISPLAY = 8
@@ -763,12 +797,12 @@ class NeuralNet(BaseEstimator):
 
                             DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
                             dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
-                            self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.validation_output_folder)
-                            if (idx >= MAX_DISPLAY):
-                                break
-
-                    filename = os.path.join(self.validation_output_folder, 'epoch_{:04d}'.format(num_epochs_past + epoch))
-                    self.write_model_data_hdf5 (filename)
+                            if (self.validation_plot_func is not None):
+                                self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.validation_output_folder)
+                                if (idx >= MAX_DISPLAY):
+                                    break
+                '''
+                
 
                 t_total = time() - t_start
 
@@ -779,6 +813,7 @@ class NeuralNet(BaseEstimator):
                     'valid_loss': avg_valid_loss,
                     'valid_loss_best': best_valid_loss == avg_valid_loss,
                     'valid_accuracy': avg_valid_accuracy,
+                    'train_accuracy': avg_train_accuracy,
                     'train_dur': t_train,
                     'val_dur': t_val,
                     'img_dur': t_get_img,
@@ -790,6 +825,10 @@ class NeuralNet(BaseEstimator):
                 self.train_history_.append(info)
                 for func in on_epoch_finished:
                     func(self, self.train_history_)
+
+                if (self.validation_output_folder is not None):
+                    filename = os.path.join(self.validation_output_folder, 'epoch_{:04d}'.format(num_epochs_past + epoch))
+                    self.write_model_data_hdf5 (filename)
 
             except StopIteration:
                 break
@@ -1001,51 +1040,3 @@ class NeuralNet(BaseEstimator):
                   train_history [epoch_num-1] = temp_dic
         self.train_history_ = train_history
         lasagne.layers.set_all_param_values(self.layers_[-1], read_data)
-
-
-    def plot_validation_output(self,Xb,yb,p_out,epoch_idx,output_folder):
-      indices_to_disp = list(range(Xb.shape[0]))
-      y_out = np.argmax(p_out,axis=1)
-      num_subplots = 12
-      num_rows = 4
-      num_cols = 4
-      nn_out_norm = mpl.colors.Normalize(vmin=-10.,vmax=10.)
-      for index_to_disp in indices_to_disp:
-        fig = figure.Figure (figsize=(5*num_cols,5*num_rows))
-        canvas = FigureCanvas(fig)
-        ax1 = fig.add_subplot(num_rows,num_cols,1)
-        ax1.imshow(np.squeeze(np.rollaxis(Xb[index_to_disp,:],0,3)), cmap = mpl.cm.Greys_r)
-        ax1.set_title("Input Image")
-
-        ax2 = fig.add_subplot(num_rows,num_cols,2)
-        gt_im = ax2.imshow(yb[index_to_disp],cmap=self.cmap,  norm=self.norm)
-        ax2.set_title("GT Labels")
-
-        ax3 = fig.add_subplot(num_rows,num_cols,3)
-        out_im = ax3.imshow(y_out[index_to_disp],cmap=self.cmap, norm=self.norm)
-        ax3.set_title("Predicted Labels")
-
-        resp_idx = 0
-        labels_to_disp = [0,1,2,22,4,5,6,7,8,9,11,18]
-        # cityscapes[0,1,6,7,8,11,12,23,26,24,27,20]
-        #sunrgbd [0,1,2,22,4,5,6,7,8,9,11,18]
-        for r in range(1,num_rows):
-            for c in range (num_cols):
-                ax = fig.add_subplot(num_rows,num_cols,num_cols*r+c+1)
-                out_hm = ax.imshow(p_out[index_to_disp][labels_to_disp[resp_idx]],norm=nn_out_norm)
-                ax.set_title(self.label_list[labels_to_disp[resp_idx]]+" Response")
-                resp_idx+=1
-
-
-        fig.subplots_adjust(right=0.95)
-        cbar_ax = fig.add_axes([0.96, 0.1, 0.03, 0.8])
-
-        cbar = fig.colorbar(gt_im, cax=cbar_ax, ticks = np.array(list(range(len(self.label_list))))+0.5)
-        temp = cbar.ax.set_yticklabels(list(self.label_list))
-
-        cbar_ax2 = fig.add_axes([0.85, 0.72, 0.03, 0.18])
-        cbar2 = fig.colorbar(out_hm, cax=cbar_ax2)
-
-        filename = os.path.join(output_folder, '{:06d}_{:04d}.png'.format(epoch_idx,index_to_disp))
-        canvas.print_figure(filename, bbox_inches='tight')
-        plt.close(fig)

@@ -46,6 +46,7 @@ class PrintLog:
 
         if not nn.regression:
             info_tabulate['valid acc'] = info['valid_accuracy']
+            info_tabulate['train acc'] = info['train_accuracy']
 
         if nn.custom_scores:
             for custom_score in nn.custom_scores:
@@ -53,7 +54,7 @@ class PrintLog:
 
         info_tabulate['train_dur'] = "{:.3f}s".format(info['train_dur'])
         info_tabulate['val_dur'] = "{:.3f}s".format(info['val_dur'])
-        info_tabulate['img_dur'] = "{:.3f}s".format(info['img_dur'])
+        #info_tabulate['img_dur'] = "{:.3f}s".format(info['img_dur'])
         info_tabulate['total_dur'] = "{:.3f}s".format(info['total_dur'])
         tabulated = tabulate(
             [info_tabulate], headers="keys", floatfmt='.5f')
