@@ -396,9 +396,9 @@ class NeuralNet(BaseEstimator):
         else:
             self.objective_weights = objective_weights
 
-        self.batch_iterator_train = batch_iterator_train
-        self.batch_iterator_test = batch_iterator_test
-        self.batch_iterator_valid = batch_iterator_valid
+        self.batch_iterator_train = batch_iterator_train if type(batch_iterator_train) is list else [batch_iterator_train]
+        self.batch_iterator_test = batch_iterator_test  if type(batch_iterator_test) is list else [batch_iterator_test]
+        self.batch_iterator_valid = batch_iterator_valid  if type(batch_iterator_valid) is list else [batch_iterator_valid]
         self.regression = regression
         self.max_epochs = max_epochs
         self.train_split = train_split
@@ -722,56 +722,62 @@ class NeuralNet(BaseEstimator):
             t_val = 0
             t_get_img = 0
             t_start = time()
-            for idx, (Xdisp, ydisp, dt,names) in enumerate(self.batch_iterator_train(X_valid, y_valid,  use_norm = False)):
-                t_get_img += dt
-                t_start_train = time()
-                Xb,yb = self.batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
-                if self.y_transform is not None:
-                    yb = self.y_transform(yb)
-                batch_train_loss, batch_train_accuracy = self.apply_batch_func(
-                    self.train_iter_, Xb, yb)
-                train_losses.append(batch_train_loss)
-                train_accuracies.append (batch_train_accuracy)
+            total_disp_count = 0
+            for b_idx, batch_iterator_train in enumerate(self.batch_iterator_train):
+              for idx, (Xdisp, ydisp, dt,names) in enumerate(batch_iterator_train(X_valid, y_valid,  use_norm = False)):
+                  t_get_img += dt
+                  t_start_train = time()
+                  Xb,yb = batch_iterator_train.normalize(Xdisp.copy(),ydisp)
+                  if self.y_transform is not None:
+                      yb = self.y_transform(yb)
+                  batch_train_loss, batch_train_accuracy = self.apply_batch_func(
+                      self.train_iter_, Xb, yb)
+                  train_losses.append(batch_train_loss)
+                  train_accuracies.append (batch_train_accuracy)
 
-                if (self.train_output_folder is not None and idx < self.num_imgs_out):
-                    predictions = self.predict (Xb)
-                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
-                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
-                    if (self.validation_plot_func is not None):
-                        self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.train_output_folder)
-                        if (idx >= self.num_imgs_out):
-                            break
+                  if (self.train_output_folder is not None and idx < self.num_imgs_out):
+                      predictions = self.predict (Xb)
+                      DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                      dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                      if (self.validation_plot_func is not None):
+                          self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=total_disp_count, output_folder= self.train_output_folder)
+                          total_disp_count += Xdisp.shape[0]
+                          if (idx >= self.num_imgs_out):
+                              break
 
-                for func in on_batch_finished:
-                    func(self, self.train_history_)
-                t_train += time() - t_start_train
+                  for func in on_batch_finished:
+                      func(self, self.train_history_)
+                  t_train += time() - t_start_train
+              
+            total_disp_count = 0
+            for b_idx, batch_iterator_valid in enumerate(self.batch_iterator_valid):
+              for idx, (Xdisp, ydisp, dt,names) in enumerate(batch_iterator_valid(X_valid, y_valid,  use_norm = False)):
+                  t_get_img += dt
+                  t_start_val = time()
+                  Xb,yb = batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
+                  if self.y_transform is not None:
+                      yb = self.y_transform(yb)
+                  batch_valid_loss, accuracy = self.apply_batch_func(
+                      self.eval_iter_, Xb, yb)
+                  valid_losses.append(batch_valid_loss)
+                  valid_accuracies.append(accuracy)
 
-            for idx, (Xdisp, ydisp, dt,names) in enumerate(self.batch_iterator_valid(X_valid, y_valid,  use_norm = False)):
-                t_get_img += dt
-                t_start_val = time()
-                Xb,yb = self.batch_iterator_valid.normalize(Xdisp.copy(),ydisp)
-                if self.y_transform is not None:
-                    yb = self.y_transform(yb)
-                batch_valid_loss, accuracy = self.apply_batch_func(
-                    self.eval_iter_, Xb, yb)
-                valid_losses.append(batch_valid_loss)
-                valid_accuracies.append(accuracy)
+                  if self.custom_scores:
+                      y_prob = self.apply_batch_func(self.predict_iter_, Xb)
+                      for custom_scorer, custom_score in zip(self.custom_scores, custom_scores):
+                          custom_score.append(custom_scorer[1](yb, y_prob))
 
-                if self.custom_scores:
-                    y_prob = self.apply_batch_func(self.predict_iter_, Xb)
-                    for custom_scorer, custom_score in zip(self.custom_scores, custom_scores):
-                        custom_score.append(custom_scorer[1](yb, y_prob))
+                  if (self.validation_output_folder is not None and idx < self.num_imgs_out):
+                      predictions = self.predict (Xb)
+                      DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
+                      dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
+                      if (self.validation_plot_func is not None):
+                          self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=total_disp_count, output_folder= self.validation_output_folder)
+                          total_disp_count += Xdisp.shape[0]
+                          if (idx >= self.num_imgs_out):
+                              break
 
-                if (self.validation_output_folder is not None and idx < self.num_imgs_out):
-                    predictions = self.predict (Xb)
-                    DummySelf = namedtuple('DummySelf', ['label_list','cmap','norm'])
-                    dummy_self = DummySelf (self.label_list, self.cmap,self.norm)
-                    if (self.validation_plot_func is not None):
-                        self.validation_plot_func(self=dummy_self, Xb=Xdisp, yb=ydisp,p_out=predictions,epoch=(num_epochs_past + epoch), start_idx=idx, output_folder= self.validation_output_folder)
-                        if (idx >= self.num_imgs_out):
-                            break
-
-                t_val += time() - t_start_val
+                  t_val += time() - t_start_val
             avg_train_loss = np.mean(train_losses)
             avg_valid_loss = np.mean(valid_losses)
             avg_valid_accuracy = np.mean(valid_accuracies)
@@ -785,7 +791,7 @@ class NeuralNet(BaseEstimator):
                 best_valid_loss = avg_valid_loss
 
 
-            try:
+            try: 
                 '''
                 if (self.validation_output_folder is not None):
                     if (epoch % 1 == 0):
@@ -850,8 +856,9 @@ class NeuralNet(BaseEstimator):
 
     def predict_proba(self, X):
         probas = []
-        for Xb, yb in self.batch_iterator_test(X):
-            probas.append(self.apply_batch_func(self.predict_iter_, Xb))
+        for batch_iterator_test in self.batch_iterator_test:
+            for Xb, yb in batch_iterator_test(X):
+                probas.append(self.apply_batch_func(self.predict_iter_, Xb))
         return np.vstack(probas)
 
     def predict(self, X):
@@ -880,8 +887,9 @@ class NeuralNet(BaseEstimator):
             get_activity = fn_cache[layer]
 
         outputs = []
-        for Xb, yb in self.batch_iterator_test(X):
-            outputs.append(get_activity(Xb))
+        for batch_iterator_test in self.batch_iterator_test:
+            for Xb, yb in batch_iterator_test(X):
+                outputs.append(get_activity(Xb))
         return np.vstack(outputs)
 
     def score(self, X, y):
